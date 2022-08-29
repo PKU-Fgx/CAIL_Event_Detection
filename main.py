@@ -1,8 +1,3 @@
-# ================== #
-# 1. Add Mutil-GPUs;
-# ================== #
-
-import os
 import json
 import torch
 import random
@@ -11,16 +6,22 @@ import numpy as np
 import seqeval.metrics as se
 
 from utils import *
-from model import BertCRFForTokenClassification
-
+from torch import nn
+from torchcrf import CRF
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader
+
+from model import ModelForTokenClassification
+
 from transformers import (
     AdamW,
     AutoConfig,
     AutoTokenizer,
     get_cosine_schedule_with_warmup
 )
+
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -45,16 +46,14 @@ def set_seed(args):
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if args.use_mutil_gpu:
-        torch.cuda.manual_seed_all(args.seed)
-
 
 def get_labels(args):
     return open(os.path.join(args.data_path, args.label_name), "r").readline()
 
 
 def load_examples(args, data_name, tokenizer, labels, pad_token_label_id, mode):
-    cached_features_file = args.data_path + "/Cache/cached_{}_{}".format(data_name, mode)
+    """ 返回一个tokenizer后的dataset """
+    cached_features_file = args.data_path + "/Cache/cached_{}_{}_{}".format(args.save_name, data_name.split(".")[0], args.max_seq_length)
     if os.path.exists(cached_features_file) and not args.overwrite_cache:
         logger.info("Loading features from cached file %s", cached_features_file)
         features = torch.load(cached_features_file)
@@ -62,9 +61,9 @@ def load_examples(args, data_name, tokenizer, labels, pad_token_label_id, mode):
         logger.info("Creating features from dataset file at %s", os.path.join(args.data_path, data_name))
         examples = read_examples_from_file(os.path.join(args.data_path, data_name), mode)
         features = convert_examples_to_features(
-            examples, labels, tokenizer, pad_token_label_id=pad_token_label_id, max_seq_length=args.max_seq_length,
-            sep_token_extra = False  # RoBERTa uses an extra separator b/w pairs of sentences
+            examples, labels, tokenizer, pad_token_label_id=pad_token_label_id, max_seq_length=args.max_seq_length
         )
+
         logger.info("Saving features into cached file %s", cached_features_file)
         torch.save(features, cached_features_file)
 
@@ -86,19 +85,21 @@ def myFn(batch, pad_token_label_id):
 def train(args, train_loader, valid_loader, model, tokenizer, labels, pad_token_label_id):
     """ Train the model """
     
-    logger.info("********** Running training **********")
+    logger.info("***************** Running Training *****************")
     logger.info("    Num Train Loader = %d", len(train_loader))
     logger.info("    Num Epochs = %d", args.num_train_epochs)
     logger.info("    Batch Size = %d", args.train_batch_size)
+    logger.info("    Learning Rate = %f", args.lr)
     
     # -------------- #
     #   差分学习率
     # -------------- #
-    bert_params = list(map(id, model.bert.parameters()))
+    bert_params = list(map(id, model.bert.parameters()))  # --- ← 4/5.改模型时需修改 --- #
     base_params = filter(lambda p: id(p) not in bert_params, model.parameters())
 
     optimizer_grouped_parameters = [
-        { "params": base_params, "lr": args.lr * 100, "weight_decay": 0.0 },
+        { "params": base_params, "lr": args.lr, "weight_decay": 0.0 },
+        # --- 5/5.改模型时需修改↓ --- #
         { "params": model.bert.parameters(), "lr": args.lr, "weight_decay": 0.0 }
     ]
     
@@ -112,8 +113,9 @@ def train(args, train_loader, valid_loader, model, tokenizer, labels, pad_token_
             raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
         model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
     
-    global_step = 0
-    best_dev_f1 = -100.0
+    set_seed(args)  # Added here for reproductibility
+    
+    global_step, best_dev_f1 = 0, -1.0
     for epoch in range(args.num_train_epochs):
         model.train()
         
@@ -148,6 +150,10 @@ def train(args, train_loader, valid_loader, model, tokenizer, labels, pad_token_
                 global_step += 1
 
                 if global_step % args.eva_step == 0:
+                    logger.info("**************** Running Evaluation ****************")
+                    logger.info("    Current Epoch = %d", epoch)
+                    logger.info("    Current Step = %d", global_step)
+                    logger.info("    Current AvgLoss = %.6f", sum(loss_list)/len(loss_list))
                     results, _ = evaluate(args, valid_loader, model, tokenizer, labels, pad_token_label_id, mode="valid")
 
                     if (results['f1-micro'] + results['f1-macro']) / 2 > best_dev_f1:
@@ -155,52 +161,44 @@ def train(args, train_loader, valid_loader, model, tokenizer, labels, pad_token_
                         #     Saving
                         # -------------- #
                         best_dev_f1 = (results['f1-micro'] + results['f1-macro']) / 2
-                        model_to_save = model.module if hasattr(model, "module") else model
 
                         model_save_path = args.output_path + "/" + args.save_name
+                        tokenizer.save_pretrained(model_save_path)
+                        model.save_pretrained(model_save_path)
 
-                        model_to_save.save_pretrained(model_save_path)
-
+                        logger.info("-·-·-·-·-·-·-·-·-·-·--·-·-·-·-·-·-·-")
                         logger.info("    Best epoch: %d", epoch)
-                        logger.info("    Best f1: {}".format(best_dev_f1))
+                        logger.info("    Best step: %d", global_step)
+                        logger.info("    Best f1: {}     ヾ(≧▽≦*)o！".format(best_dev_f1))
                         
         if not args.do_valid:
             # -------------- #
             #     Saving
             # -------------- #
-            best_dev_f1 = (results['f1-micro'] + results['f1-macro']) / 2
-            model_to_save = model.module if hasattr(model, "module") else model
-
             model_save_path = args.output_path + "/" + args.save_name
-
-            model_to_save.save_pretrained(model_save_path)
+            tokenizer.save_pretrained(model_save_path)
+            model.save_pretrained(model_save_path)
 
 
 def evaluate(args, valid_loader, model, tokenizer, label_list, pad_token_label_id, mode="valid"):
     """ Evaluation """
-    
-    logger.info("********** Running evaluation **********")
-    logger.info("    Num examples = %d", len(valid_loader))
-    logger.info("    Batch size = %d", args.valid_batch_size)
-    
     model.eval()
 
     preds, out_label_ids = list(), list()
-    valid_bar = tqdm(valid_loader)
     with torch.no_grad():
-        for batch in valid_bar:
+        for batch in tqdm(valid_loader, desc="Evaluating..."):
             batch = { k: v.to(args.device) for k, v in batch.items()}
             labels = batch.pop("labels")
         
             best_path = model(pad_token_label_id=pad_token_label_id, **batch)
-            
+
             preds.extend(best_path.tolist())
             out_label_ids.extend(labels.tolist())
     
     label_map = { i: label for i, label in enumerate(label_list) }
     
     out_label_list = [[] for _ in range(len(out_label_ids))]
-    preds_list = [[] for _ in range(len(out_label_ids))]
+    preds_list     = [[] for _ in range(len(out_label_ids))]
     
     for i in range(len(out_label_ids)):
         for j in range(len(out_label_ids[i])):
@@ -209,12 +207,12 @@ def evaluate(args, valid_loader, model, tokenizer, label_list, pad_token_label_i
                 preds_list[i].append(label_map[preds[i][j]])
       
     results = {
-        "p-micro": se.precision_score(out_label_list, preds_list, average='micro'),
-        "r-micro": se.recall_score(out_label_list, preds_list, average='micro'),
+        "p-micro":  se.precision_score(out_label_list, preds_list, average='micro'),
+        "r-micro":  se.recall_score(out_label_list, preds_list, average='micro'),
         "f1-micro": se.f1_score(out_label_list, preds_list, average='micro'),
 
-        "p-marco": se.precision_score(out_label_list, preds_list, average='macro'),
-        "r-marco": se.recall_score(out_label_list, preds_list, average='macro'),
+        "p-marco":  se.precision_score(out_label_list, preds_list, average='macro'),
+        "r-marco":  se.recall_score(out_label_list, preds_list, average='macro'),
         "f1-macro": se.f1_score(out_label_list, preds_list, average='macro'),
     }
 
@@ -232,7 +230,7 @@ def evaluate(args, valid_loader, model, tokenizer, label_list, pad_token_label_i
         file=open(f"{args.output_path}/{args.save_name}/prf_report_dict.json", "w")
     )
     
-    logger.info("********** Eval results **********")
+    logger.info("******************* Eval Results *******************")
     for key in results.keys():
         logger.info("    %s = %s", key, str(results[key]))
     logger.info("    Avg F1 = %s" % ((results["f1-micro"] + results["f1-macro"]) / 2))
@@ -285,12 +283,11 @@ def main():
     parser.add_argument("--do_train", action="store_true", help="Whether to run training.")
     parser.add_argument("--do_valid", action="store_true", help="Whether to run eval on the dev set.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for initialization")
-    parser.add_argument("--use_mutil_gpu", action="store_true", help="Whether to use more than 1 gpu.")
     parser.add_argument("--gpu_idx", default=0, help="GPU's num.")
     parser.add_argument("--overwrite_cache", action="store_true", help="Whether to rewrite the cached dataset.")
     parser.add_argument(
         "--fp16", action="store_true",
-        help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit"
+        help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit."
     )
     parser.add_argument(
         "--fp16_opt_level", type=str, default="O1",
@@ -299,6 +296,9 @@ def main():
     
     args = parser.parse_args()
     
+    # --------------------------------------------- #
+    # (1) 检查模型的保存位置是否为空为被占用
+    # --------------------------------------------- #
     save_path = os.path.join(args.output_path, args.save_name)
     if os.path.exists(save_path) and os.listdir(save_path) and args.do_train:
         raise ValueError("Output directory ({}) already exists and is not empty.".format(save_path))
@@ -306,7 +306,7 @@ def main():
         os.mkdir(save_path)
     
     # --------------------------------------------- #
-    # Setting Logger
+    # (2) 设置 Logger
     # --------------------------------------------- #
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -323,46 +323,53 @@ def main():
     logging.getLogger("transformers.modeling_utils").setLevel(logging.WARN)
     logging.getLogger("transformers.tokenization_utils").setLevel(logging.WARN)
 
-    if args.use_mutil_gpu:
-        logger.warning(
-            "Process rank: %s, device: %s, n_gpu: %s, distributed training: %s, 16-bits training: %s",
-            args.local_rank, device, args.n_gpu, bool(args.local_rank != -1), args.fp16
-        )
-        raise ValueError("[×] 该方法尚未实现！")
-    else:
-        device = "cuda:{}".format(args.gpu_idx) if torch.cuda.is_available() else "cpu"
-    args.device = device
+    # --------------------------------------------- #
+    # (3) 设置 Device 与随机种子
+    # --------------------------------------------- #
+    args.device = "cuda:{}".format(args.gpu_idx) if torch.cuda.is_available() else "cpu"
     
     set_seed(args)
     
+    # --------------------------------------------- #
+    # (4) 获得标签
+    # --------------------------------------------- #
     labels = eval(get_labels(args))
     num_labels = len(labels)
     
     # --------------------------------------------- #
-    # 使用交叉熵忽略索引(为`-100`)作为填充标签 ID，以便以后只有真实的标签 ID 有助于损失
+    # (5) 使用交叉熵忽略索引(为`-100`)作为填充标签
+    #     ID，以便以后只有真实的标签 ID 有助于损失
     # --------------------------------------------- #
     pad_token_label_id = torch.nn.CrossEntropyLoss().ignore_index
     
+    # --------------------------------------------- #
+    # (6) 设置 Model 与 Tokenizer
+    # --------------------------------------------- #
+    logger.info("-- Model Type: %s", args.save_name)
     args.pretrained_model_path = os.path.join(args.ptm_path, args.model_name)
     model_config = AutoConfig.from_pretrained(args.pretrained_model_path, num_labels=num_labels)
     tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model_path, use_fast=True)
     
-    ner_model = BertCRFForTokenClassification.from_pretrained(args.pretrained_model_path, config=model_config)
+    ner_model = ModelForTokenClassification.from_pretrained(args.pretrained_model_path, config=model_config)
     ner_model = ner_model.to(args.device)
     
     # --------------------------------------------- #
-    # Training
+    # (7) Training
     # --------------------------------------------- #
     if args.do_train:
         train_dataset = load_examples(args, args.train_data_name, tokenizer, labels, pad_token_label_id, mode="train")
         train_loader = DataLoader(
             train_dataset, args.train_batch_size, shuffle=True, collate_fn=lambda x: myFn(x, pad_token_label_id)
         )
+        
         valid_dataset = load_examples(args, args.valid_data_name, tokenizer, labels, pad_token_label_id, mode="valid")
         valid_loader = DataLoader(
             valid_dataset, args.valid_batch_size, shuffle=False, collate_fn=lambda x: myFn(x, pad_token_label_id)
         )
+
         train(args, train_loader, valid_loader, ner_model, tokenizer, labels, pad_token_label_id)
+    
+    logger.info("****************** End of Running ******************")
 
 if __name__ == "__main__":
     main()
