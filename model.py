@@ -4,8 +4,10 @@ from torch import nn
 from torchcrf import CRF
 from torch.nn.utils.rnn import pad_sequence
 from transformers import (
+    PreTrainedModel,
     LongformerModel, LongformerPreTrainedModel,
     BertModel, BertPreTrainedModel,
+    NezhaModel, NezhaPreTrainedModel,
     AlbertModel, AlbertPreTrainedModel,
     RobertaModel, RobertaPreTrainedModel,
     DebertaV2Model, DebertaV2PreTrainedModel
@@ -38,15 +40,46 @@ def unpad_crf(returned_array, returned_mask, org_mask, pad_token_label_id):
     return out_array
 
 
+class ModelPreTrainedModel(PreTrainedModel):
+    """
+    An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
+    models.
+    """
+
+    supports_gradient_checkpointing = True
+    _keys_to_ignore_on_load_missing = [r"positions_encoding"]
+
+    def _init_weights(self, module):
+        """ Initialize the weights """
+        if isinstance(module, nn.Linear):
+            # Slightly different from the TF version which uses truncated_normal for initialization
+            # cf https://github.com/pytorch/pytorch/pull/5617
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+            
+
 # ---------------------- CRF 款模型 ---------------------- #
-class ModelCRFForTokenClassification(BertPreTrainedModel):  # --- ← 1/5.改模型时需修改 --- #
+class ModelCRFForTokenClassification(ModelPreTrainedModel):
     
     def __init__(self, config):
         super(ModelCRFForTokenClassification, self).__init__(config)
         self.num_labels = config.num_labels
+        self.model_type = config._name_or_path.split("/")[-1].split("-")
 
-        # --- 2/5.改模型时需修改↓ --- #
-        self.bert = BertModel(config)
+        if "nezha" in self.model_type:
+            self.nezha = NezhaModel(config)
+        elif "bert" in self.model_type:
+            self.bert = BertModel(config)
+        else:
+            raise ValueError("--model_name 参数异常，在模型初始化时出错，请检查！")
         
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
@@ -55,8 +88,13 @@ class ModelCRFForTokenClassification(BertPreTrainedModel):  # --- ← 1/5.改模
         self.init_weights()
 
     def get_features(self, input_ids=None, attention_mask=None, token_type_ids=None):
-        # --- 3/5.改模型时需修改↓ --- #
-        outputs = self.bert(input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
+        if "nezha" in self.model_type:
+            outputs = self.nezha(input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
+        elif "bert" in self.model_type:
+            outputs = self.bert(input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
+        else:
+            raise ValueError("--model_name 参数异常，在模型Foward时出错，请检查！")
+            
         features = self.classifier(self.dropout(outputs.last_hidden_state))
         
         return features
@@ -109,14 +147,19 @@ class ModelCRFForTokenClassification(BertPreTrainedModel):  # --- ← 1/5.改模
 
 
 # ---------------------- 经典款模型 ---------------------- #
-class ModelForTokenClassification(BertPreTrainedModel):  # --- ← 1/5.改模型时需修改 --- #
+class ModelForTokenClassification(ModelPreTrainedModel):
     
     def __init__(self, config):
         super(ModelForTokenClassification, self).__init__(config)
         self.num_labels = config.num_labels
+        self.model_type = config._name_or_path.split("/")[-1].split("-")
 
-        # --- 2/5.改模型时需修改↓ --- #
-        self.bert = BertModel(config)
+        if "nezha" in self.model_type:
+            self.nezha = NezhaModel(config)
+        elif "bert" in self.model_type:
+            self.bert = BertModel(config)
+        else:
+            raise ValueError("--model_name 参数异常，在模型初始化时出错，请检查！")
         
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
@@ -126,8 +169,13 @@ class ModelForTokenClassification(BertPreTrainedModel):  # --- ← 1/5.改模型
         self.init_weights()
 
     def get_features(self, input_ids=None, attention_mask=None, token_type_ids=None):
-        # --- 3/5.改模型时需修改↓ --- #
-        outputs = self.bert(input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
+        if "nezha" in self.model_type:
+            outputs = self.nezha(input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
+        elif "bert" in self.model_type:
+            outputs = self.bert(input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
+        else:
+            raise ValueError("--model_name 参数异常，在模型Foward时出错，请检查！")
+            
         features = self.classifier(self.dropout(outputs.last_hidden_state))
         
         return features

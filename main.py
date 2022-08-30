@@ -7,7 +7,6 @@ import seqeval.metrics as se
 
 from utils import *
 from torch import nn
-from torchcrf import CRF
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader
 
@@ -17,7 +16,8 @@ from transformers import (
     AdamW,
     AutoConfig,
     AutoTokenizer,
-    get_cosine_schedule_with_warmup
+    get_cosine_schedule_with_warmup,
+    get_linear_schedule_with_warmup
 )
 
 import os
@@ -85,26 +85,30 @@ def myFn(batch, pad_token_label_id):
 def train(args, train_loader, valid_loader, model, tokenizer, labels, pad_token_label_id):
     """ Train the model """
     
-    logger.info("***************** Running Training *****************")
+    logger.info("================= Running Training =================")
     logger.info("    Num Train Loader = %d", len(train_loader))
-    logger.info("    Num Epochs = %d", args.num_train_epochs)
-    logger.info("    Batch Size = %d", args.train_batch_size)
-    logger.info("    Learning Rate = %f", args.lr)
+    logger.info("    Num Epochs       = %d", args.num_train_epochs)
+    logger.info("    Batch Size       = %d", args.train_batch_size)
+    logger.info("    Learning Rate    = %f", args.lr)
     
     # -------------- #
     #   差分学习率
     # -------------- #
-    bert_params = list(map(id, model.bert.parameters()))  # --- ← 4/5.改模型时需修改 --- #
-    base_params = filter(lambda p: id(p) not in bert_params, model.parameters())
-
+    if "bert" in args.model_name.split("-"):
+        bone_params = model.bert.parameters()
+    elif "nezha" in args.model_name.split("-"):
+        bone_params = model.nezha.parameters()
+    else:
+        raise ValueError("--model_name 参数异常，请检查！")
+        
+    base_params = filter(lambda p: id(p) not in list(map(id, bone_params)), model.parameters())
     optimizer_grouped_parameters = [
         { "params": base_params, "lr": args.lr, "weight_decay": 0.0 },
-        # --- 5/5.改模型时需修改↓ --- #
-        { "params": model.bert.parameters(), "lr": args.lr, "weight_decay": 0.0 }
+        { "params": bone_params, "lr": args.lr, "weight_decay": 0.0 }
     ]
     
     optimizer = AdamW(optimizer_grouped_parameters, eps=args.adam_epsilon)
-    scheduler = get_cosine_schedule_with_warmup(optimizer, 0, len(train_loader) * args.num_train_epochs)
+    scheduler = get_linear_schedule_with_warmup(optimizer, 0, len(train_loader) * args.num_train_epochs)
     
     if args.fp16:
         try:
@@ -113,7 +117,7 @@ def train(args, train_loader, valid_loader, model, tokenizer, labels, pad_token_
             raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
         model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
     
-    set_seed(args)  # Added here for reproductibility
+    # set_seed(args)  # Added here for reproductibility
     
     global_step, best_dev_f1 = 0, -1.0
     for epoch in range(args.num_train_epochs):
@@ -149,11 +153,11 @@ def train(args, train_loader, valid_loader, model, tokenizer, labels, pad_token_
             if args.do_valid:
                 global_step += 1
 
-                if global_step % args.eva_step == 0:
-                    logger.info("**************** Running Evaluation ****************")
-                    logger.info("    Current Epoch = %d", epoch)
-                    logger.info("    Current Step = %d", global_step)
-                    logger.info("    Current AvgLoss = %.6f", sum(loss_list)/len(loss_list))
+                if global_step % args.eva_step == 0 and epoch >= args.eval_begin_step:
+                    logger.info("================ Running Evaluation ================")
+                    logger.info("    Current Epoch    = %d", epoch)
+                    logger.info("    Current Step     = %d", global_step)
+                    logger.info("    Current AvgLoss  = %.6f", sum(loss_list)/len(loss_list))
                     results, _ = evaluate(args, valid_loader, model, tokenizer, labels, pad_token_label_id, mode="valid")
 
                     if (results['f1-micro'] + results['f1-macro']) / 2 > best_dev_f1:
@@ -165,11 +169,17 @@ def train(args, train_loader, valid_loader, model, tokenizer, labels, pad_token_
                         model_save_path = args.output_path + "/" + args.save_name
                         tokenizer.save_pretrained(model_save_path)
                         model.save_pretrained(model_save_path)
+                        
+                        logger.info("=================== Eval Results ===================")
+                        for key in results.keys():
+                            if "f1" in str(key):
+                                logger.info("    %s = %s", key, str(results[key]))
+                        logger.info("    Avg F1   = %s" % ((results["f1-micro"] + results["f1-macro"]) / 2))
 
                         logger.info("-·-·-·-·-·-·-·-·-·-·--·-·-·-·-·-·-·-")
                         logger.info("    Best epoch: %d", epoch)
-                        logger.info("    Best step: %d", global_step)
-                        logger.info("    Best f1: {}     ヾ(≧▽≦*)o！".format(best_dev_f1))
+                        logger.info("    Best step : %d", global_step)
+                        logger.info("    Best f1   : {}    ヾ(≧▽≦*)o！".format(best_dev_f1))
                         
         if not args.do_valid:
             # -------------- #
@@ -230,11 +240,6 @@ def evaluate(args, valid_loader, model, tokenizer, label_list, pad_token_label_i
         file=open(f"{args.output_path}/{args.save_name}/prf_report_dict.json", "w")
     )
     
-    logger.info("******************* Eval Results *******************")
-    for key in results.keys():
-        logger.info("    %s = %s", key, str(results[key]))
-    logger.info("    Avg F1 = %s" % ((results["f1-micro"] + results["f1-macro"]) / 2))
-
     return results, preds_list
 
 
@@ -285,6 +290,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed for initialization")
     parser.add_argument("--gpu_idx", default=0, help="GPU's num.")
     parser.add_argument("--overwrite_cache", action="store_true", help="Whether to rewrite the cached dataset.")
+    parser.add_argument("--eval_begin_step", default=1, help="Begin to evaluate while training from X epoch.")
     parser.add_argument(
         "--fp16", action="store_true",
         help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit."
@@ -328,7 +334,7 @@ def main():
     # --------------------------------------------- #
     args.device = "cuda:{}".format(args.gpu_idx) if torch.cuda.is_available() else "cpu"
     
-    set_seed(args)
+    # set_seed(args)
     
     # --------------------------------------------- #
     # (4) 获得标签
@@ -345,7 +351,7 @@ def main():
     # --------------------------------------------- #
     # (6) 设置 Model 与 Tokenizer
     # --------------------------------------------- #
-    logger.info("-- Model Type: %s", args.save_name)
+    logger.info("Model Type: %s", args.save_name)
     args.pretrained_model_path = os.path.join(args.ptm_path, args.model_name)
     model_config = AutoConfig.from_pretrained(args.pretrained_model_path, num_labels=num_labels)
     tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model_path, use_fast=True)
@@ -369,7 +375,7 @@ def main():
 
         train(args, train_loader, valid_loader, ner_model, tokenizer, labels, pad_token_label_id)
     
-    logger.info("****************** End of Running ******************")
+    logger.info("================== End of Running ==================")
 
 if __name__ == "__main__":
     main()

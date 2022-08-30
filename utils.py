@@ -83,11 +83,9 @@ def convert_examples_to_features(examples, label_list, tokenizer, pad_token_labe
         for word, label in zip(example.words, example.labels):
             word_tokens = tokenizer.tokenize(word)
             if len(word_tokens) == 0:
-                tokens.extend(["[UNK]"])
-                label_ids.extend([label2id[label]])
-            else:
-                tokens.extend(word_tokens)
-                label_ids.extend([label2id[label]] + [pad_token_label_id] * (len(word_tokens) - 1))
+                word_tokens = ["[UNK]"]
+            tokens.extend(word_tokens)
+            label_ids.extend([label2id[label]] + [pad_token_label_id] * (len(word_tokens) - 1))
 
         if len(label_ids) > max_seq_length - 2 and len(tokens) > max_seq_length - 2:
             tokens = tokens[:(max_seq_length - 2)]
