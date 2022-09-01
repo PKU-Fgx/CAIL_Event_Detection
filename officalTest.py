@@ -19,8 +19,8 @@ from transformers import (
 #    每次运行时可能需要更改的参数
 # -============ BEGIN =============- #
 device = "cuda:0"
-model_type = "bert-noCRF"
-pretrained_model_path = "/tf/FangGexiang/1.CAILED/ModelSaved/bert-base-cn-noCRF"
+model_type = "nezha-base"
+pretrained_model_path = "/tf/FangGexiang/1.CAILED/ModelSaved/nezha-base"
 output_test_predictions_file = pretrained_model_path + "/results.jsonl"
 # -============= END ==============- #
 
@@ -148,7 +148,7 @@ def evaluate(device, loader, model, tokenizer, label_list, pad_token_label_id):
             batch = { k: v.to(device) for k, v in batch.items()}
             labels = batch.pop("labels")
         
-            best_path = model(pad_token_label_id=pad_token_label_id, **batch)
+            best_path = model(**batch)
 
             preds.extend(best_path.tolist())
             out_label_ids.extend(labels.tolist())
