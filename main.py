@@ -129,7 +129,7 @@ def train(args, train_loader, valid_loader, model, tokenizer, labels, pad_token_
     ]
     
     if args.use_crf:
-        crf_params = model.module.crf.named_parameters()
+        crf_params = model.crf.named_parameters()
         optimizer_grouped_parameters.extend([
             { "params": [p for n, p in crf_params if not any(nd in n for nd in no_decay)], "lr": args.lr * 100, "weight_decay": args.weight_decay},
             { "params": [p for n, p in crf_params if any(nd in n for nd in no_decay)], "lr": args.lr * 100, "weight_decay": 0.0}
