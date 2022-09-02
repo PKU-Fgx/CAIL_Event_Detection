@@ -12,3 +12,11 @@
 ## 1. Brach：`myCodeV1`
 
 &emsp;&emsp;把代码改成了我自己熟悉的样子；
+
+## 2. Brach：`myCodeV2`
+
+&emsp;&emsp;保证基础可运行版本；
+
+## 3. Brach：`magic_reform_v1`
+
+&emsp;&emsp;开始魔改；
