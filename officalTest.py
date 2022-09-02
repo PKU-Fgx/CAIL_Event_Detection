@@ -5,7 +5,10 @@ import jsonlines
 import numpy as np
 
 from tqdm import tqdm
-from model import ModelForTokenClassification
+from model import (
+    ModelForTokenClassification,
+    ModelCRFForTokenClassification
+)
 
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
@@ -18,9 +21,9 @@ from transformers import (
 # -============ BEGIN =============- #
 #    每次运行时可能需要更改的参数
 # -============ BEGIN =============- #
-device = "cuda:0"
-model_type = "nezha-base"
-pretrained_model_path = "/tf/FangGexiang/1.CAILED/ModelSaved/nezha-base"
+device = "cuda:1"
+model_type = "bert-base-cn-CRF"
+pretrained_model_path = "/tf/FangGexiang/1.CAILED/ModelSaved/" + model_type
 output_test_predictions_file = pretrained_model_path + "/results.jsonl"
 # -============= END ==============- #
 
@@ -146,6 +149,7 @@ def evaluate(device, loader, model, tokenizer, label_list, pad_token_label_id):
     with torch.no_grad():
         for batch in tqdm(loader, desc="Evaluating..."):
             batch = { k: v.to(device) for k, v in batch.items()}
+            batch.update({ "pad_token_label_id": pad_token_label_id })
             labels = batch.pop("labels")
         
             best_path = model(**batch)
@@ -182,7 +186,7 @@ labels = eval(open(bio_label_path, "r").readline())
 tokenizer = AutoTokenizer.from_pretrained(pretrained_model_path, use_fast=True)
 model_config = AutoConfig.from_pretrained(pretrained_model_path, num_labels=len(labels))
 
-ner_model = ModelForTokenClassification.from_pretrained(pretrained_model_path, config=model_config).to(device)
+ner_model = ModelCRFForTokenClassification.from_pretrained(pretrained_model_path, config=model_config).to(device)
 
 test_dataset = load_examples(test_data_name, tokenizer, labels, pad_token_label_id=-100, max_seq_length=max_seq_length)
 test_loader = DataLoader(

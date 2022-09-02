@@ -6,6 +6,7 @@ import numpy as np
 import seqeval.metrics as se
 
 from utils import *
+from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader
 
@@ -23,7 +24,7 @@ from transformers import (
 )
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -128,7 +129,7 @@ def train(args, train_loader, valid_loader, model, tokenizer, labels, pad_token_
     ]
     
     if args.use_crf:
-        crf_params = model.crf.named_parameters()
+        crf_params = model.module.crf.named_parameters()
         optimizer_grouped_parameters.extend([
             { "params": [p for n, p in crf_params if not any(nd in n for nd in no_decay)], "lr": args.lr * 100, "weight_decay": args.weight_decay},
             { "params": [p for n, p in crf_params if any(nd in n for nd in no_decay)], "lr": args.lr * 100, "weight_decay": 0.0}
@@ -388,6 +389,7 @@ def main():
         ner_model = ModelCRFForTokenClassification.from_pretrained(args.pretrained_model_path, config=model_config)
     else:
         ner_model = ModelForTokenClassification.from_pretrained(args.pretrained_model_path, config=model_config)
+        
     ner_model = ner_model.to(args.device)
     
     # --------------------------------------------- #

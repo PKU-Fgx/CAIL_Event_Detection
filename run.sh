@@ -4,7 +4,7 @@ python main.py \
     --do_valid \
     --max_seq_length 512 \
     --model_name "bert-base-chinese" \
-    --save_name "bert-base-cn-CRF" \
+    --save_name "parall-test" \
     --train_batch_size 16 \
     --valid_batch_size 16 \
     --lr 5e-5 \

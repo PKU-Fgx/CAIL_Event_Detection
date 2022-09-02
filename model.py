@@ -167,13 +167,8 @@ class ModelCRFForTokenClassification(ModelPreTrainedModel):
             # done later in my_crf_ner but it should be kept away
             # when calculating loss.
             # ---------------------------------------------------- #
-            try:
-                loss = -1.0 * self.crf(crf_logits, crf_labels, crf_mask)
-            except ValueError:
-                print(crf_logits)
-                print(crf_labels)
-                print(crf_mask)
-                exit()
+            loss = -1.0 * self.crf(crf_logits, crf_labels, crf_mask)
+
             
             return loss
         else:
