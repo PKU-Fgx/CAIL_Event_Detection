@@ -1,17 +1,17 @@
-python main.py \
-    --eva_step 150 \
+accelerate launch main.py \
+    --eva_step 50 \
     --do_train \
     --do_valid \
     --max_seq_length 512 \
-    --model_name "bert-base-chinese" \
-    --save_name "run-test" \
+    --model_name "bert-base-cn-law" \
+    --save_name "bert-base-cn-law" \
     --train_batch_size 16 \
     --valid_batch_size 32 \
+    --max_grad_norm 10.0 \
     --warmup_type "linear" \
     --lr 5e-5 \
     --num_train_epochs 10 \
-    --gpu_idx 0 \
-    --fp16 \
     --eval_begin_epoch 1 \
     --seed 100 \
-    --use_crf \
+    --use_mutil_gpu \
+    # --use_crf \

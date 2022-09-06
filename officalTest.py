@@ -5,11 +5,9 @@ import jsonlines
 import numpy as np
 
 from tqdm import tqdm
-from model import (
-    ModelForTokenClassification,
-    ModelCRFForTokenClassification
-)
+from model import ModelForTokenClassification
 
+from dataclasses import dataclass
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 
@@ -18,13 +16,23 @@ from transformers import (
     AutoTokenizer
 )
 
+@dataclass
+class Arguments:
+    """ 模型的参数 """
+    last_n: int = 1
+    pooling_type: str = "mean"
+    MSD: bool = False
+    use_crf: bool = True
+args = Arguments()
+
 # -============ BEGIN =============- #
 #    每次运行时可能需要更改的参数
 # -============ BEGIN =============- #
 device = "cuda:1"
-model_type = "bert-base-cn-CRF"
-pretrained_model_path = "/tf/FangGexiang/1.CAILED/ModelSaved/" + model_type
-output_test_predictions_file = pretrained_model_path + "/results.jsonl"
+model_type = "bert-base-chinese-CRF-MSD"
+args.last_n = 1
+args.pooling_type = "mean"
+args.MSD = True
 # -============= END ==============- #
 
 max_seq_length = 512
@@ -34,6 +42,9 @@ test_data_name = "test_stage1.jsonl"
 data_root_path = "/tf/FangGexiang/1.CAILED/Data"
 listLabel_path = "/tf/FangGexiang/1.CAILED/Data/label.txt"
 bio_label_path = "/tf/FangGexiang/1.CAILED/Data/bio_label.txt"
+
+pretrained_model_path = "/tf/FangGexiang/1.CAILED/ModelSaved/" + model_type
+output_test_predictions_file = pretrained_model_path + f"/{model_type}-results.jsonl"
 
 
 class myDataset(Dataset):
@@ -135,8 +146,8 @@ def load_examples(data_name, tokenizer, labels, pad_token_label_id, max_seq_leng
             examples, labels, tokenizer, pad_token_label_id=pad_token_label_id, max_seq_length=max_seq_length
         )
 
-        print("Saving features into cached file %s", cached_features_file)
-        torch.save(features, cached_features_file)
+        # print("Saving features into cached file %s", cached_features_file)
+        # torch.save(features, cached_features_file)
 
     return myDataset(features)
 
@@ -186,7 +197,7 @@ labels = eval(open(bio_label_path, "r").readline())
 tokenizer = AutoTokenizer.from_pretrained(pretrained_model_path, use_fast=True)
 model_config = AutoConfig.from_pretrained(pretrained_model_path, num_labels=len(labels))
 
-ner_model = ModelCRFForTokenClassification.from_pretrained(pretrained_model_path, config=model_config).to(device)
+ner_model = ModelForTokenClassification.from_pretrained(pretrained_model_path, config=model_config, args=args).to(device)
 
 test_dataset = load_examples(test_data_name, tokenizer, labels, pad_token_label_id=-100, max_seq_length=max_seq_length)
 test_loader = DataLoader(

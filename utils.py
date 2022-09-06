@@ -1,7 +1,10 @@
+import os
 import torch
+import logging
 import jsonlines
 
 from tqdm import tqdm
+from torch.nn.utils.rnn import pad_sequence
 
 
 class InputExample(object):
@@ -133,3 +136,73 @@ def convert_examples_to_features(examples, label_list, tokenizer, pad_token_labe
         )
         
     return features
+
+
+# -------------------------------------------- #
+# crf_array 就是每个原生token对应一个标签
+# crf_pad   就是末尾pad的部分的mask为false
+# -------------------------------------------- #
+def to_crf_pad(org_array, org_mask, pad_label_id):
+    """ [docs]
+    The viterbi decoder function in CRF makes use of multiplicative property of 0,
+    then pads wrong numbers out. Need a*0 = 0 for CRF to work.
+    """
+    crf_array = [aa[bb] for aa, bb in zip(org_array, org_mask) if bb.any()]
+    crf_array = pad_sequence(crf_array, batch_first=True, padding_value=pad_label_id)
+    
+    crf_pad = (crf_array != pad_label_id)
+    crf_array[~crf_pad] = 0
+
+    return crf_array, crf_pad
+
+
+def unpad_crf(returned_array, returned_mask, org_mask, pad_token_label_id):
+    out_array = torch.ones(
+        org_mask.shape, dtype=torch.int64, device=returned_mask.device
+    ) * pad_token_label_id
+    out_array[org_mask] = returned_array[returned_mask]
+    
+    return out_array
+
+
+def check_file_path(args):
+    save_path = os.path.join(args.output_path, args.save_name)
+    if os.path.exists(save_path) and os.listdir(save_path) and args.do_train:
+        raise ValueError("Output directory ({}) already exists and is not empty.".format(save_path))
+    if not os.path.exists(save_path):
+        os.mkdir(save_path)
+
+
+def setting_logger(logger, args):
+    logging.basicConfig(format="%(asctime)s - %(message)s", datefmt="%m/%d/%Y %H:%M:%S", level=logging.INFO)
+            
+    handler = logging.FileHandler(args.output_path + "/" + args.save_name + "/log.txt")
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+    logger.addHandler(handler)
+    
+    logging.getLogger("transformers.configuration_utils").setLevel(logging.WARN)
+    logging.getLogger("transformers.modeling_utils").setLevel(logging.WARN)
+    logging.getLogger("transformers.tokenization_utils").setLevel(logging.WARN)
+
+
+def print_cfg(logger, len_train_loader, total_step, args):
+    logger.info("================= Running Training =================")
+    logger.info("    Num Train Loader     = %d", len_train_loader)
+    logger.info("    Total Step           = %d", total_step)
+    logger.info("    Num Epochs           = %d", args.num_train_epochs)
+    logger.info("    Train Batch Size     = %d", args.train_batch_size)
+    logger.info("    Valid Batch Size     = %d", args.valid_batch_size)
+    logger.info("    Learning Rate        = %f", args.lr)
+    logger.info("    Weight Decay         = %f", args.weight_decay)
+    logger.info("    Warmup Prop          = %f", args.warmup_proportion)
+    logger.info("    Seed                 = %d", args.seed)
+    logger.info("    Model Name           = %s", args.model_name)
+    logger.info("    Eva Begin Epoch      = %d", args.eval_begin_epoch)
+    logger.info("    Using CRF            = %s", str(args.use_crf))
+    logger.info("    Using Last n         = %d", args.last_n)
+    logger.info("    Pooling Type(n > 1)  = %s", args.pooling_type)
+    logger.info("    Adam Epsilon         = %s", str(args.adam_epsilon))
+    logger.info("    Max Grad Norm        = %f", args.max_grad_norm)
+    logger.info("    Multi-Sample Dropout = %s", str(args.MSD))
+    logger.info("    Warm-up Type         = %s", args.warmup_type)
