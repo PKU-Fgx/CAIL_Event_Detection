@@ -20,3 +20,7 @@
 ## 3. Brach：`magic_reform_v1`
 
 &emsp;&emsp;开始魔改；
+
+## 4. Brach：`acc_ver_1`
+
+&emsp;&emsp;这里加上了多卡并行运行，但是有个BUG就是如果加CRF的同时使用fp16进行加速的话，loss会变成nan；
