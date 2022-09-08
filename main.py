@@ -17,7 +17,6 @@ import seqeval.metrics as se
 from utils import *
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader
-from accelerate import Accelerator, DistributedDataParallelKwargs
 
 from model import ModelForTokenClassification
 
@@ -53,7 +52,7 @@ def get_labels(args):
     return open(os.path.join(args.data_path, args.label_name), "r").readline()
 
 
-def load_examples(args, accelerator, data_name, tokenizer, labels, pad_token_label_id, mode):
+def load_examples(args, data_name, tokenizer, labels, pad_token_label_id, mode):
     """ 返回一个tokenizer后的dataset """
     cached_features_file = args.data_path + "/Cache/cached_{}_{}_{}".format(args.save_name, data_name.split(".")[0], args.max_seq_length)
 
@@ -61,24 +60,21 @@ def load_examples(args, accelerator, data_name, tokenizer, labels, pad_token_lab
         # ----------------------------------- #
         # 如果已经存在数据缓存则直接读取
         # ----------------------------------- #
-        if accelerator.is_main_process:
-            logger.info("Loading features from cached file %s", cached_features_file)
+        logger.info("Loading features from cached file %s", cached_features_file)
         features = torch.load(cached_features_file)
     else:
         # ----------------------------------- #
         # 没有数据缓存则直接创建缓存并保存
         # ----------------------------------- #
-        if accelerator.is_main_process:
-            logger.info("Creating features from dataset file at %s", os.path.join(args.data_path + args.data_fold, data_name))
+        logger.info("Creating features from dataset file at %s", os.path.join(args.data_path + args.data_fold, data_name))
 
         examples = read_examples_from_file(os.path.join(args.data_path + args.data_fold, data_name), mode)
         features = convert_examples_to_features(
             examples, labels, tokenizer, pad_token_label_id=pad_token_label_id, max_seq_length=args.max_seq_length
         )
 
-        if accelerator.is_main_process:
-            logger.info("Saving features into cached file %s", cached_features_file)
-            torch.save(features, cached_features_file)
+        logger.info("Saving features into cached file %s", cached_features_file)
+        torch.save(features, cached_features_file)
 
     return myDataset(features)
 
@@ -97,12 +93,11 @@ def myFn(batch, pad_token_label_id):
     }
 
 
-def train(args, accelerator, train_loader, valid_loader, model, tokenizer, labels, pad_token_label_id):
+def train(args, train_loader, valid_loader, model, tokenizer, labels, pad_token_label_id):
     """ Train the model """
 
     total_step = len(train_loader) * args.num_train_epochs
-    if accelerator.is_main_process:
-        print_cfg(logger, len(train_loader), total_step, args)
+    print_cfg(logger, len(train_loader), total_step, args)
 
     # -------------- #
     #   差分学习率
@@ -144,17 +139,12 @@ def train(args, accelerator, train_loader, valid_loader, model, tokenizer, label
     else:
         raise ValueError("--warmup_type 参数异常, 请检查 schedyler 的参数!")
     
-    if args.use_mutil_gpu:
-        model, optimizer, train_loader, scheduler = accelerator.prepare(
-            model, optimizer, train_loader, scheduler
-        )
-    else:
-        if args.fp16:
-            try:
-                from apex import amp
-            except ImportError:
-                raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-            model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
+    if args.fp16:
+        try:
+            from apex import amp
+        except ImportError:
+            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
+        model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
     
     set_seed(args)  # Added here for reproductibility
     
@@ -167,29 +157,22 @@ def train(args, accelerator, train_loader, valid_loader, model, tokenizer, label
         for batch in train_bar:
             optimizer.zero_grad()
 
-            if not args.use_mutil_gpu:
-                batch = { k: v.to(args.device) for k, v in batch.items()}
+            batch = { k: v.to(args.device) for k, v in batch.items()}
             batch.update({"pad_token_label_id": pad_token_label_id})
             batch.pop("candi_mask")
             
             loss = model(**batch)
             
-            if args.use_mutil_gpu:
-                accelerator.backward(loss)
+            if args.fp16:
+                with amp.scale_loss(loss, optimizer) as scaled_loss:
+                    scaled_loss.backward()
             else:
-                if args.fp16:
-                    with amp.scale_loss(loss, optimizer) as scaled_loss:
-                        scaled_loss.backward()
-                else:
-                    loss.backward()
+                loss.backward()
             
-            if args.use_mutil_gpu:
-                accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+            if args.fp16:
+                torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
             else:
-                if args.fp16:
-                    torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
-                else:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             
             optimizer.step()
             scheduler.step()
@@ -203,31 +186,35 @@ def train(args, accelerator, train_loader, valid_loader, model, tokenizer, label
                 global_step += 1
 
                 if global_step % args.eva_step == 0 and epoch >= args.eval_begin_epoch:
-                    if accelerator.is_main_process:
-                        results, _ = evaluate(args, valid_loader, model, labels, pad_token_label_id)
+                    results, _ = evaluate(args, valid_loader, model, labels, pad_token_label_id)
 
-                        if (results['f1-micro'] + results['f1-macro']) / 2 > best_dev_f1:
-                            best_dev_f1 = (results['f1-micro'] + results['f1-macro']) / 2
+                    if (results['f1-micro'] + results['f1-macro']) / 2 > best_dev_f1:
+                        best_dev_f1 = (results['f1-micro'] + results['f1-macro']) / 2
 
-                            # -------------- #
-                            #     Saving
-                            # -------------- #
-                            model_save_path = args.output_path + "/" + args.save_name
-                            unwrapped_model = accelerator.unwrap_model(model)
-                            unwrapped_model.save_pretrained(
-                                model_save_path,
-                                is_main_process=accelerator.is_main_process,
-                                save_function=accelerator.save
-                            )
-                            tokenizer.save_pretrained(model_save_path)
+                        # -------------- #
+                        #     Saving
+                        # -------------- #
+                        model_save_path = args.output_path + "/" + args.save_name + "/" + f"Local[]-Test2[]-{args.data_fold}"
+                        model.save_pretrained(model_save_path)
+                        tokenizer.save_pretrained(model_save_path)
 
-                            logger.info("Epoch %2d | Step %5d | F1-Micro %.3f | F1-Macro %.3f | Avg F1 %.3f |  ↑" % (
-                                epoch, global_step, results['f1-micro'] * 100, results['f1-macro'] * 100, (results['f1-micro'] + results['f1-macro']) * 50
-                            ))
-                        else:
-                            logger.info("Epoch %2d | Step %5d | F1-Micro %.3f | F1-Macro %.3f | Avg F1 %.3f |" % (
-                                epoch, global_step, results['f1-micro'] * 100, results['f1-macro'] * 100, (results['f1-micro'] + results['f1-macro']) * 50
-                            ))
+                        logger.info("Epoch %2d | Step %5d | AvgLoss %8.5f | F1-Micro %.3f | F1-Macro %.3f | Avg F1 %.3f |  ↑" % (
+                            epoch,
+                            global_step,
+                            sum(loss_list) / len(loss_list),
+                            results['f1-micro'] * 100,
+                            results['f1-macro'] * 100,
+                            (results['f1-micro'] + results['f1-macro']) * 50
+                        ))
+                    else:
+                        logger.info("Epoch %2d | Step %5d | AvgLoss %8.5f | F1-Micro %.3f | F1-Macro %.3f | Avg F1 %.3f |" % (
+                            epoch,
+                            global_step,
+                            sum(loss_list) / len(loss_list),
+                            results['f1-micro'] * 100,
+                            results['f1-macro'] * 100,
+                            (results['f1-micro'] + results['f1-macro']) * 50
+                        ))
 
 
 def evaluate(args, valid_loader, model, label_list, pad_token_label_id):
@@ -287,9 +274,6 @@ def evaluate(args, valid_loader, model, label_list, pad_token_label_id):
 
 def main():
     parser = argparse.ArgumentParser()
-    accelerator = Accelerator(
-        kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)]
-    )
     
     # --------------------------------------------- #
     # 1.所有文件都是相对于根目录文件路径;
@@ -299,7 +283,7 @@ def main():
     parser.add_argument("--result_path",       default="/result_saved/",                              type=str, help="结果输出位置")
     parser.add_argument("--output_path",       default="/tf/FangGexiang/1.CAILED/ModelSaved",         type=str, help="模型存储位置")
     parser.add_argument("--data_path",         default="/tf/FangGexiang/1.CAILED/Data",               type=str, help="存放数据的文件夹")
-    parser.add_argument("--data_fold",         default="/fold_2",                                     type=str, help="几折数据的文件夹")
+    parser.add_argument("--data_fold",         default="/fold_1",                                     type=str, help="几折数据的文件夹")
     parser.add_argument("--ptm_path",          default="/tf/FangGexiang/3.SememeV2/pretrained_model", type=str, help="预训练模型位置")
     
     # --------------------------------------------- #
@@ -323,17 +307,16 @@ def main():
     # --------------------------------------------- #
     # 4.训练参数;
     # --------------------------------------------- #
-    parser.add_argument("--train_batch_size",  default=8,                      type=int,   help="Batch size for training.")
-    parser.add_argument("--valid_batch_size",  default=8,                      type=int,   help="Batch size for evaluation.")
+    parser.add_argument("--train_batch_size",  default=16,                     type=int,   help="Batch size for training.")
+    parser.add_argument("--valid_batch_size",  default=32,                     type=int,   help="Batch size for evaluation.")
     parser.add_argument("--lr",                default=5e-5,                   type=float, help="The initial learning rate for Optimizer.")
-    parser.add_argument("--num_train_epochs",  default=1,                      type=int,   help="Total number of training epochs.")
+    parser.add_argument("--num_train_epochs",  default=10,                     type=int,   help="Total number of training epochs.")
     parser.add_argument("--adam_epsilon",      default=1e-8,                   type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument("--weight_decay",      default=0.01,                   type=float, help="Weight decay if we apply some.")
     parser.add_argument("--max_grad_norm",     default=1.0,                    type=float, help="Max gradient norm.")
-    parser.add_argument("--eva_step",          default=100,                    type=int,   help="Every X steps to evaluate.")
+    parser.add_argument("--eva_step",          default=150,                    type=int,   help="Every X steps to evaluate.")
     parser.add_argument("--warmup_proportion", default=0.1,                    type=int,   help="When to begin to warmup.")
     parser.add_argument("--warmup_type",       default="linear",               type=str,   help="Warmup type selected in ['linear', 'consin'].")
-    parser.add_argument("--use_mutil_gpu",     action ="store_true",                       help="Whether to use mutil-GPU while training")
 
     # --------------------------------------------- #
     # 5.其他参数;
@@ -352,14 +335,12 @@ def main():
     # --------------------------------------------- #
     # (1) 检查模型的保存位置是否为空为被占用
     # --------------------------------------------- #
-    if accelerator.is_main_process:
-        check_file_path(args)
+    check_file_path(args)
     
     # --------------------------------------------- #
     # (2) 设置 Logger
     # --------------------------------------------- #
-    if accelerator.is_main_process:
-        setting_logger(logger, args)
+    setting_logger(logger, args)
 
     # --------------------------------------------- #
     # (3) 设置 Device 与随机种子
@@ -386,25 +367,23 @@ def main():
     model_config = AutoConfig.from_pretrained(args.pretrained_model_path, num_labels=num_labels, output_hidden_states=True)
     tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model_path, use_fast=True)
     
-    ner_model = ModelForTokenClassification.from_pretrained(args.pretrained_model_path, config=model_config, args=args)
-    if not args.use_mutil_gpu:
-        ner_model = ner_model.to(args.device)
+    ner_model = ModelForTokenClassification.from_pretrained(args.pretrained_model_path, config=model_config, args=args).to(args.device)
     
     # --------------------------------------------- #
     # (7) Training
     # --------------------------------------------- #
     if args.do_train:
-        train_dataset = load_examples(args, accelerator, args.train_data_name, tokenizer, labels, pad_token_label_id, mode="train")
+        train_dataset = load_examples(args, args.train_data_name, tokenizer, labels, pad_token_label_id, mode="train")
         train_loader = DataLoader(
             train_dataset, args.train_batch_size, shuffle=True, collate_fn=lambda x: myFn(x, pad_token_label_id)
         )
         
-        valid_dataset = load_examples(args, accelerator, args.valid_data_name, tokenizer, labels, pad_token_label_id, mode="valid")
+        valid_dataset = load_examples(args, args.valid_data_name, tokenizer, labels, pad_token_label_id, mode="valid")
         valid_loader = DataLoader(
             valid_dataset, args.valid_batch_size, shuffle=False, collate_fn=lambda x: myFn(x, pad_token_label_id)
         )
 
-        train(args, accelerator, train_loader, valid_loader, ner_model, tokenizer, labels, pad_token_label_id)
+        train(args, train_loader, valid_loader, ner_model, tokenizer, labels, pad_token_label_id)
     
 if __name__ == "__main__":
     main()

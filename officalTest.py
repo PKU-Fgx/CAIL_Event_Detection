@@ -1,4 +1,6 @@
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
+
 import json
 import torch
 import jsonlines
@@ -16,6 +18,10 @@ from transformers import (
     AutoTokenizer
 )
 
+
+# -============ BEGIN =============- #
+#    每次运行时可能需要更改的参数
+# -============ BEGIN =============- #
 @dataclass
 class Arguments:
     """ 模型的参数 """
@@ -25,14 +31,8 @@ class Arguments:
     use_crf: bool = True
 args = Arguments()
 
-# -============ BEGIN =============- #
-#    每次运行时可能需要更改的参数
-# -============ BEGIN =============- #
-device = "cuda:1"
-model_type = "bert-base-chinese-CRF-MSD"
-args.last_n = 1
-args.pooling_type = "mean"
-args.MSD = True
+device = "cuda:2"
+model_type = "bert-base-chinese-CRF-fold-3"
 # -============= END ==============- #
 
 max_seq_length = 512
@@ -44,7 +44,7 @@ listLabel_path = "/tf/FangGexiang/1.CAILED/Data/label.txt"
 bio_label_path = "/tf/FangGexiang/1.CAILED/Data/bio_label.txt"
 
 pretrained_model_path = "/tf/FangGexiang/1.CAILED/ModelSaved/" + model_type
-output_test_predictions_file = pretrained_model_path + f"/{model_type}-results.jsonl"
+output_test_predictions_file = pretrained_model_path + f"/{model_type}-results-{test_data_name}"
 
 
 class myDataset(Dataset):
@@ -137,16 +137,16 @@ def convert_examples_to_features(examples, label_list, tokenizer, pad_token_labe
 def load_examples(data_name, tokenizer, labels, pad_token_label_id, max_seq_length):
     cached_features_file = "/tf/FangGexiang/1.CAILED/Data/Cache/cached_{}_infer_{}".format(model_type, max_seq_length)
     if os.path.exists(cached_features_file):
-        print("Loading features from cached file %s", cached_features_file)
+        print("Loading features from cached file %s" % cached_features_file)
         features = torch.load(cached_features_file)
     else:
-        print("Creating features from dataset file at %s", os.path.join(data_root_path, data_name))
+        print("Creating features from dataset file at %s" % os.path.join(data_root_path, data_name))
         examples = read_examples_from_file(os.path.join(data_root_path, data_name))
         features = convert_examples_to_features(
             examples, labels, tokenizer, pad_token_label_id=pad_token_label_id, max_seq_length=max_seq_length
         )
 
-        # print("Saving features into cached file %s", cached_features_file)
+        # print("Saving features into cached file %s" % cached_features_file)
         # torch.save(features, cached_features_file)
 
     return myDataset(features)

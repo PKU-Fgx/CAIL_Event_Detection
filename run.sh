@@ -3,15 +3,17 @@ python main.py \
     --do_train \
     --do_valid \
     --max_seq_length 512 \
+    --data_fold "/fold_3" \
     --model_name "bert-base-chinese" \
-    --save_name "run-test" \
+    --save_name "bert-base-chinese-CRF-fold-3" \
     --train_batch_size 16 \
     --valid_batch_size 32 \
     --warmup_type "linear" \
-    --lr 5e-5 \
+    --lr 1e-4 \
     --num_train_epochs 10 \
-    --gpu_idx 0 \
+    --gpu_idx 2 \
     --fp16 \
     --eval_begin_epoch 1 \
     --seed 100 \
     --use_crf \
+    --overwrite_cache \
