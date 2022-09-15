@@ -3,6 +3,8 @@ import torch
 from utils import *
 from torch import nn
 from torchcrf import CRF
+from focal import FocalLoss
+
 from transformers import (
     PreTrainedModel,
     BertModel,
@@ -63,6 +65,11 @@ class ModelForTokenClassification(ModelPreTrainedModel):
 
         if self.args.use_crf:
             self.crf = CRF(self.num_labels, batch_first=True)
+        else:
+            self.loss_fn = nn.CrossEntropyLoss()
+        
+        if self.args.use_focal:
+            self.focal_loss_fn = FocalLoss(self.num_labels, self.args.focal_gamma, self.args.focal_alpha)
 
         self.init_weights()
 
@@ -81,18 +88,22 @@ class ModelForTokenClassification(ModelPreTrainedModel):
         if self.args.last_n == 1:
             features = outputs.last_hidden_state
         else:
+            model_outs = torch.stack(outputs.hidden_states[-1 * self.args.last_n:], dim=-1)
             if self.args.pooling_type == "mean":
-                model_outs = torch.stack(outputs.hidden_states[-1 * self.args.last_n:], dim=-1)
                 features = torch.mean(model_outs, dim=-1)
+
             elif self.args.pooling_type == "max":
-                model_outs = torch.stack(outputs.hidden_states[-1 * self.args.last_n:], dim=-1)
                 features = torch.max(model_outs, dim=-1).values
+
+            elif self.args.pooling_type == "sum":
+                features = torch.sum(model_outs, dim=-1)
+                
             else:
                 raise ValueError("--pooling_type 参数异常, 未知的池化方式!")
         
         return features
 
-    def forward(self, input_ids=None, attention_mask=None, token_type_ids=None, labels=None, pad_token_label_id=None):
+    def forward(self, input_ids=None, attention_mask=None, token_type_ids=None, labels=None, pad_token_label_id=None, epoch=None):
         features = self.get_features(input_ids, attention_mask, token_type_ids)
 
         if self.args.MSD:
@@ -115,13 +126,30 @@ class ModelForTokenClassification(ModelPreTrainedModel):
                 crf_labels, crf_mask = to_crf_pad(labels, loss_mask, pad_token_label_id)
                 crf_logits, _        = to_crf_pad(logits, loss_mask, pad_token_label_id)
 
-                loss = -1.0 * self.crf(crf_logits, crf_labels, crf_mask)
+                if self.args.use_focal:
+                    if epoch < self.args.focal_begin_epoch:
+                        loss = -1.0 * self.crf(crf_logits, crf_labels, crf_mask)
+                    else:
+                        focal_loss = self.focal_loss_fn(crf_logits.view((-1, crf_logits.shape[-1])), crf_labels.view(-1))
+                        crf_loss   = -1.0 * self.crf(crf_logits, crf_labels, crf_mask)
+                        loss       = self.args.focal_weight * focal_loss + ((1 - self.args.focal_weight) * crf_loss)
+                
+                else:
+                    loss = -1.0 * self.crf(crf_logits, crf_labels, crf_mask)
 
                 return loss
             else:
-                loss_fn = nn.CrossEntropyLoss()
+                if self.args.use_focal:
+                    if epoch < self.args.focal_begin_epoch:
+                        loss = self.loss_fn(logits.view((-1, logits.shape[-1])), labels.view(-1))
+                    else:
+                        focal_loss = self.focal_loss_fn(logits.view((-1, crf_logits.shape[-1])), labels.view(-1))
+                        ce_loss    = self.loss_fn(logits.view((-1, logits.shape[-1])), labels.view(-1))
+                        loss       = self.args.focal_weight * focal_loss + (1 - self.args.focal_weight) * ce_loss
+                else:
+                    loss = self.loss_fn(logits.view((-1, logits.shape[-1])), labels.view(-1))
 
-                return loss_fn(logits.view((-1, logits.shape[-1])), labels.view(-1))
+                return loss
         else:
             if self.args.use_crf:
                 # ---------------------------------------------------- #

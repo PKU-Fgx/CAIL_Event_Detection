@@ -66,15 +66,16 @@ def load_examples(args, data_name, tokenizer, labels, pad_token_label_id, mode):
         # ----------------------------------- #
         # 没有数据缓存则直接创建缓存并保存
         # ----------------------------------- #
-        logger.info("Creating features from dataset file at %s", os.path.join(args.data_path + args.data_fold, data_name))
+        logger.info("Creating features from dataset file at %s", args.data_path + args.data_fold + data_name)
 
-        examples = read_examples_from_file(os.path.join(args.data_path + args.data_fold, data_name), mode)
+        examples = read_examples_from_file(args.data_path + args.data_fold + data_name, mode)
         features = convert_examples_to_features(
             examples, labels, tokenizer, pad_token_label_id=pad_token_label_id, max_seq_length=args.max_seq_length
         )
 
-        logger.info("Saving features into cached file %s", cached_features_file)
-        torch.save(features, cached_features_file)
+        if args.do_save_data:
+            logger.info("Saving features into cached file %s", cached_features_file)
+            torch.save(features, cached_features_file)
 
     return myDataset(features)
 
@@ -145,11 +146,18 @@ def train(args, train_loader, valid_loader, model, tokenizer, labels, pad_token_
         except ImportError:
             raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
         model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
+
+    if args.use_awp:
+        awp = AWP(model, optimizer, adv_lr=args.awp_adv_lr, adv_eps=args.awp_adv_eps, start_epoch=args.awp_start_epoch, adv_step=args.awp_adv_step)
     
     set_seed(args)  # Added here for reproductibility
     
     global_step, best_dev_f1 = 0, -1.0
     for epoch in range(args.num_train_epochs):
+        if epoch == args.early_stop_epoch:
+            logger.info("Early Stop at Epoch {}".format(args.early_stop_epoch))
+            exit(0)
+
         model.train()
         
         loss_list = list()
@@ -158,7 +166,7 @@ def train(args, train_loader, valid_loader, model, tokenizer, labels, pad_token_
             optimizer.zero_grad()
 
             batch = { k: v.to(args.device) for k, v in batch.items()}
-            batch.update({"pad_token_label_id": pad_token_label_id})
+            batch.update({"pad_token_label_id": pad_token_label_id, "epoch": epoch})
             batch.pop("candi_mask")
             
             loss = model(**batch)
@@ -168,6 +176,10 @@ def train(args, train_loader, valid_loader, model, tokenizer, labels, pad_token_
                     scaled_loss.backward()
             else:
                 loss.backward()
+
+            if args.use_awp:
+                if best_dev_f1 > 0.8:
+                    awp.attack_backward(**batch)
             
             if args.fp16:
                 torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
@@ -182,7 +194,7 @@ def train(args, train_loader, valid_loader, model, tokenizer, labels, pad_token_
                 epoch, args.num_train_epochs, global_step, sum(loss_list)/len(loss_list)
             ))
             
-            if args.do_valid:
+            if args.do_valid and valid_loader is not None:
                 global_step += 1
 
                 if global_step % args.eva_step == 0 and epoch >= args.eval_begin_epoch:
@@ -191,12 +203,13 @@ def train(args, train_loader, valid_loader, model, tokenizer, labels, pad_token_
                     if (results['f1-micro'] + results['f1-macro']) / 2 > best_dev_f1:
                         best_dev_f1 = (results['f1-micro'] + results['f1-macro']) / 2
 
-                        # -------------- #
-                        #     Saving
-                        # -------------- #
-                        model_save_path = args.output_path + "/" + args.save_name + "/" + f"Local[]-Test2[]-{args.data_fold}"
-                        model.save_pretrained(model_save_path)
-                        tokenizer.save_pretrained(model_save_path)
+                        if args.do_save:
+                            # -------------- #
+                            #     Saving
+                            # -------------- #
+                            model_save_path = args.output_path + "/" + args.save_name + "-Stage2[]-Dev[]"
+                            model.save_pretrained(model_save_path)
+                            tokenizer.save_pretrained(model_save_path)
 
                         logger.info("Epoch %2d | Step %5d | AvgLoss %8.5f | F1-Micro %.3f | F1-Macro %.3f | Avg F1 %.3f |  ↑" % (
                             epoch,
@@ -215,6 +228,14 @@ def train(args, train_loader, valid_loader, model, tokenizer, labels, pad_token_
                             results['f1-macro'] * 100,
                             (results['f1-micro'] + results['f1-macro']) * 50
                         ))
+            else:
+                if args.do_save:
+                    # -------------- #
+                    #     Saving
+                    # -------------- #
+                    model_save_path = args.output_path + "/" + args.save_name + "-Stage2[]-Dev[]"
+                    model.save_pretrained(model_save_path)
+                    tokenizer.save_pretrained(model_save_path)
 
 
 def evaluate(args, valid_loader, model, label_list, pad_token_label_id):
@@ -261,12 +282,12 @@ def evaluate(args, valid_loader, model, label_list, pad_token_label_id):
         for v in value:
             value[v] = float(value[v])
 
-    with open(f"{args.output_path}/{args.save_name}/prf_report_dict.json", "w", encoding="utf-8") as f:
+    with open(f"{args.output_path}/{args.save_name}-Stage2[]-Dev[]/prf_report_dict.json", "w", encoding="utf-8") as f:
         json.dump(info, f, indent=4, ensure_ascii=False)
 
     print(
         se.classification_report(out_label_list, preds_list, digits=4),
-        file=open(f"{args.output_path}/{args.save_name}/prf_report_text.txt", "w")
+        file=open(f"{args.output_path}/{args.save_name}-Stage2[]-Dev[]/prf_report_text.txt", "w")
     )
     
     return results, preds_list
@@ -303,6 +324,11 @@ def main():
     parser.add_argument("--pooling_type",      default="mean",                 type=str,   help="模型最后几层的融合方式")
     parser.add_argument("--use_crf",           action ="store_true",                       help="是否使用CRF")
     parser.add_argument("--MSD",               action ="store_true",                       help="是否使用 Multi-Sample Dropout")
+    parser.add_argument("--use_focal",         action ="store_true",                       help="是否使用 Focal Loss")
+    parser.add_argument("--focal_weight",      default=0.5,                    type=float, help="Focal Loss的权重(0-1之间)")
+    parser.add_argument("--focal_gamma",       default=2.0,                    type=float, help="Focal Loss的 gamma 参数")
+    parser.add_argument("--focal_alpha",       default=0.25,                   type=float, help="Focal Loss的 alpha 参数")
+    parser.add_argument("--focal_begin_epoch", default=2,                      type=int,   help="Focal Loss开始的迭代次数,0 代表从头开始")
     
     # --------------------------------------------- #
     # 4.训练参数;
@@ -315,18 +341,26 @@ def main():
     parser.add_argument("--weight_decay",      default=0.01,                   type=float, help="Weight decay if we apply some.")
     parser.add_argument("--max_grad_norm",     default=1.0,                    type=float, help="Max gradient norm.")
     parser.add_argument("--eva_step",          default=150,                    type=int,   help="Every X steps to evaluate.")
-    parser.add_argument("--warmup_proportion", default=0.1,                    type=int,   help="When to begin to warmup.")
+    parser.add_argument("--early_stop_epoch",  default=-1,                     type=int,   help="Stop when epoch is N, setting -1 is not to early stop.")
+    parser.add_argument("--warmup_proportion", default=0.1,                    type=float, help="When to begin to warmup.")
     parser.add_argument("--warmup_type",       default="linear",               type=str,   help="Warmup type selected in ['linear', 'consin'].")
+    parser.add_argument("--awp_adv_lr",        default=0.1,                    type=float, help="Gradient attack rate.")
+    parser.add_argument("--awp_adv_eps",       default=0.2,                    type=float, help="Adversarial EPS.")
+    parser.add_argument("--awp_start_epoch",   default=2,                      type=int,   help="Begin to attack from epoch n.")
+    parser.add_argument("--awp_adv_step",      default=1,                      type=int,   help="The number of steps to attack once.")
+    parser.add_argument("--use_awp",           action ="store_true",                       help="Whether to use Adversarial Weight Perturbation.")
 
     # --------------------------------------------- #
     # 5.其他参数;
     # --------------------------------------------- #
-    parser.add_argument("--seed",              default=42,                     type=int,   help="Random seed for initialization")
+    parser.add_argument("--seed",              default=100,                    type=int,   help="Random seed for initialization")
     parser.add_argument("--gpu_idx",           default=0,                      type=int,   help="GPU's num.")
     parser.add_argument("--eval_begin_epoch",  default=1,                      type=int,   help="Begin to evaluate while training from X epoch.")
     parser.add_argument("--fp16_opt_level",    default="O1",                   type=str,   help="For fp16: Selected in ['O0', 'O1', 'O2', and 'O3'].")
     parser.add_argument("--do_train",          action ="store_true",                       help="Whether to run training.")
     parser.add_argument("--do_valid",          action ="store_true",                       help="Whether to run eval on the dev set.")
+    parser.add_argument("--do_save",           action ="store_true",                       help="Whether to save model after getting best f1 on dev.")
+    parser.add_argument("--do_save_data",      action ="store_true",                       help="Whether to save data after loadding.")
     parser.add_argument("--overwrite_cache",   action ="store_true",                       help="Whether to rewrite the cached dataset.")
     parser.add_argument("--fp16",              action ="store_true",                       help="Whether to use 16-bit (mixed) precision.")
     
@@ -377,13 +411,15 @@ def main():
         train_loader = DataLoader(
             train_dataset, args.train_batch_size, shuffle=True, collate_fn=lambda x: myFn(x, pad_token_label_id)
         )
-        
-        valid_dataset = load_examples(args, args.valid_data_name, tokenizer, labels, pad_token_label_id, mode="valid")
-        valid_loader = DataLoader(
-            valid_dataset, args.valid_batch_size, shuffle=False, collate_fn=lambda x: myFn(x, pad_token_label_id)
-        )
+        if args.do_valid:
+            valid_dataset = load_examples(args, args.valid_data_name, tokenizer, labels, pad_token_label_id, mode="valid")
+            valid_loader = DataLoader(
+                valid_dataset, args.valid_batch_size, shuffle=False, collate_fn=lambda x: myFn(x, pad_token_label_id)
+            )
 
-        train(args, train_loader, valid_loader, ner_model, tokenizer, labels, pad_token_label_id)
+            train(args, train_loader, valid_loader, ner_model, tokenizer, labels, pad_token_label_id)
+        else:
+            train(args, train_loader, None, ner_model, tokenizer, labels, pad_token_label_id)
     
 if __name__ == "__main__":
     main()

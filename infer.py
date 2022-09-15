@@ -3,6 +3,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
 
 import json
 import torch
+import argparse
 import jsonlines
 import numpy as np
 
@@ -19,32 +20,36 @@ from transformers import (
 )
 
 
+parser = argparse.ArgumentParser()
+
+parser.add_argument("--last_n",       default=1,      type=int,   help="用最后几层进行池化")
+parser.add_argument("--pooling_type", default="mean", type=str,   help="池化方式（n=1时失效）")
+parser.add_argument("--MSD",          default=False,  type=bool,  help="是否使用Multi-Sample Dropout")
+parser.add_argument("--use_crf",      default=True,   type=bool,  help="是否使用CRF")
+parser.add_argument("--gpu_idx",      default=0,      type=int,   help="GPU ID")
+parser.add_argument("--model_saved",  default="None", type=str,   help="模型保存名称")
+parser.add_argument("--use_focal",    default=False,  type=bool,  help="是否使用focal loss(infer 阶段无用)")
+parser.add_argument("--do_save_data", action ="store_true", help="是否保存 test data")
+
+args = parser.parse_args()
+
 # -============ BEGIN =============- #
 #    每次运行时可能需要更改的参数
 # -============ BEGIN =============- #
-@dataclass
-class Arguments:
-    """ 模型的参数 """
-    last_n: int = 1
-    pooling_type: str = "mean"
-    MSD: bool = False
-    use_crf: bool = True
-args = Arguments()
-
-device = "cuda:2"
-model_type = "bert-base-chinese-CRF-fold-3"
+device = "cuda:{}".format(args.gpu_idx)
+model_type = args.model_saved
 # -============= END ==============- #
 
 max_seq_length = 512
 test_batch_size = 16
 
-test_data_name = "test_stage1.jsonl"
+test_data_name = "test_stage2.jsonl"
 data_root_path = "/tf/FangGexiang/1.CAILED/Data"
 listLabel_path = "/tf/FangGexiang/1.CAILED/Data/label.txt"
 bio_label_path = "/tf/FangGexiang/1.CAILED/Data/bio_label.txt"
 
 pretrained_model_path = "/tf/FangGexiang/1.CAILED/ModelSaved/" + model_type
-output_test_predictions_file = pretrained_model_path + f"/{model_type}-results-{test_data_name}"
+output_test_predictions_file = pretrained_model_path + f"/results-Stage2.jsonl"
 
 
 class myDataset(Dataset):
