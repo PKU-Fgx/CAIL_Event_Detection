@@ -1,0 +1,1 @@
+tensorboard --logdir "2022-09-16-12:46" --port 8212

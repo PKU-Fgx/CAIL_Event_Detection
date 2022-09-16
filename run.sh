@@ -1,0 +1,1 @@
+accelerate launch main.py
